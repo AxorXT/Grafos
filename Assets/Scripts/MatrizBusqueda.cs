@@ -1,106 +1,163 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 public class MatrizBusqueda : MonoBehaviour
 {
-    public GameObject actorPrefab;  // Prefab del actor
-    public GameObject goalPrefab;   // Prefab de la meta
-    private GameObject actor;       // Instancia del actor
-    private GameObject goal;        // Instancia de la meta
+    public GameObject nodePrefab;       // Prefab para cada nodo (Button)
+    public Transform gridParent;        // Contenedor del grid (Panel con GridLayoutGroup)
+    public int gridWidth = 5;           // Ancho inicial del mapa
+    public int gridHeight = 5;          // Altura inicial del mapa
 
-    public List<Node> grid = new List<Node>();  // Lista de nodos
+    public GameObject actorPrefab;      // Prefab del actor
+    public GameObject goalPrefab;       // Prefab de la meta
 
-    private Node startNode, goalNode;  // Nodo de inicio y nodo de meta
-    private List<Node> path;           // Camino más corto
+    private GameObject actor;
+    private GameObject goal;
 
-    private Material originalMaterial;  // Material original de las casillas
-    public Material pathMaterial;       // Material para resaltar el camino
-    public Material InitialgoalMaterial;  // Material para la meta
-    public Material goalReachedMaterial; // Material para la meta
+    private Node startNode, goalNode;
+    private List<Node> path;
+    private List<Node> grid = new List<Node>();
 
-    // Clase de Nodo que representa cada casilla
+    public Color pathColor = Color.blue;
+    public Color startColor = Color.green;
+    public Color goalColor = Color.red;
+
+    private bool placingActor = true;
+    private bool isGameActive = true;  // Controla si el juego está activo o no
+    private bool isMoving = false;     // Controla si el actor está en movimiento
+    private bool isCompleted = false;  // Indica si el recorrido ha terminado
+
+    public Button restartButton;       // Botón de reinicio
+
     public class Node
     {
         public Vector2 position;
-        public GameObject visualNode;  // Representación visual del nodo
+        public Button button;
         public List<Node> neighbors = new List<Node>();
 
-        public Node(Vector2 position, GameObject visualNode)
+        // Nuevos campos para A*
+        public float gCost;
+        public float hCost;
+        public Node parent;
+
+        public Node(Vector2 position, Button button)
         {
             this.position = position;
-            this.visualNode = visualNode;
+            this.button = button;
         }
     }
 
     void Start()
     {
-        GenerateGraphFromScene();   // Generar grafo desde las casillas
-        PlaceActorAndGoal();        // Colocar actor y meta aleatoriamente
-        FindAndMoveToGoal();        // Calcular el camino y mover el actor
+        GenerateGrid(gridWidth, gridHeight);
+        restartButton.onClick.AddListener(RestartGame);  // Asigna la acción de reinicio al botón
     }
 
-    // Generar el grafo desde las casillas etiquetadas como "Walkable"
-    void GenerateGraphFromScene()
+    void GenerateGrid(int width, int height)
     {
-        var walkableObjects = GameObject.FindGameObjectsWithTag("Walkable");
-
-        foreach (var obj in walkableObjects)
+        // Limpia el grid existente
+        foreach (Transform child in gridParent)
         {
-            // Crear un nodo para cada casilla
-            Node node = new Node(obj.transform.position, obj); // Asociamos un nodo con cada GameObject
-            grid.Add(node); // Agregar el nodo a la lista
+            Destroy(child.gameObject);
+        }
+        grid.Clear();
 
-            originalMaterial = obj.GetComponent<Renderer>().material; // Guardar el material original
+        // Obtén el tamaño del Canvas
+        RectTransform canvasRect = gridParent.GetComponentInParent<Canvas>().GetComponent<RectTransform>();
+        float canvasWidth = canvasRect.rect.width;
+        float canvasHeight = canvasRect.rect.height;
+
+        // Define el espacio entre los nodos
+        float spacingX = 10f;  // Espacio horizontal entre nodos
+        float spacingY = 10f;  // Espacio vertical entre nodos
+
+        // Calcula el tamaño de cada celda, incluyendo el espacio entre nodos
+        float totalWidth = canvasWidth - (spacingX * (width - 1));  // Restar el espacio entre nodos
+        float totalHeight = canvasHeight - (spacingY * (height - 1));  // Restar el espacio entre nodos
+
+        // Calcula el tamaño de cada nodo, ajustado al espacio disponible
+        float nodeWidth = totalWidth / width;
+        float nodeHeight = totalHeight / height;
+
+        // Determina el tamaño del nodo (mínimo entre el ancho y el alto calculado)
+        float nodeSize = Mathf.Min(nodeWidth, nodeHeight);
+
+        // Ajustar las configuraciones del GridLayoutGroup para que distribuya los nodos en una cuadrícula
+        GridLayoutGroup gridLayout = gridParent.GetComponent<GridLayoutGroup>();
+        gridLayout.cellSize = new Vector2(nodeSize, nodeSize); // Configura el tamaño de cada celda del GridLayoutGroup
+        gridLayout.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+        gridLayout.constraintCount = width; // Establece el número de columnas que se deben mostrar
+
+        // Configura el espacio entre los nodos
+        gridLayout.spacing = new Vector2(spacingX, spacingY); // Espacio entre los nodos (ajusta este valor para más espacio)
+
+        // Asegúrate de que las opciones de expansión no cambien el tamaño de las celdas
+        gridLayout.childAlignment = TextAnchor.UpperLeft;
+        gridLayout.padding = new RectOffset(10, 10, 10, 10); // Puedes ajustar el padding si es necesario
+
+        // Genera el nuevo grid
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Vector2 position = new Vector2(x, y);
+
+                // Instancia el botón
+                GameObject nodeObject = Instantiate(nodePrefab, gridParent);
+                Button nodeButton = nodeObject.GetComponent<Button>();
+                nodeObject.GetComponent<Image>().color = Color.white;
+
+                // Configura el nodo
+                Node node = new Node(position, nodeButton);
+                grid.Add(node);
+
+                // Configura el evento de clic, solo si el juego está activo y no está completado
+                int index = grid.Count - 1;
+                nodeButton.onClick.AddListener(() => HandleClick(grid[index]));
+            }
         }
 
-        // Conectar nodos vecinos (solo ortogonales)
-        foreach (var currentNode in grid)  // Renombramos 'node' a 'currentNode'
-        {
-            float tolerance = 0.1f;
+        ConnectNeighbors();
+    }
 
+    void ConnectNeighbors()
+    {
+        foreach (var currentNode in grid)
+        {
             foreach (var potentialNeighbor in grid)
             {
-                // Asegurarse de que la distancia en X o Y sea aproximadamente 1 unidad
-                if ((Mathf.Abs(currentNode.position.x - potentialNeighbor.position.x) <= 300 + tolerance && currentNode.position.y == potentialNeighbor.position.y) ||
-                    (Mathf.Abs(currentNode.position.y - potentialNeighbor.position.y) <= 300 + tolerance && currentNode.position.x == potentialNeighbor.position.x))
+                if (Vector2.Distance(currentNode.position, potentialNeighbor.position) <= 1.1f)
                 {
-                    currentNode.neighbors.Add(potentialNeighbor);  // Agregar vecinos ortogonales al nodo
+                    currentNode.neighbors.Add(potentialNeighbor);
                 }
             }
         }
     }
 
-    // Colocar actor y meta aleatoriamente
-    void PlaceActorAndGoal()
+    void HandleClick(Node clickedNode)
     {
-        // Seleccionamos nodos aleatorios para el inicio y la meta
-        startNode = grid[Random.Range(0, grid.Count)];
-        do
-        {
-            goalNode = grid[Random.Range(0, grid.Count)];
-        } while (goalNode == startNode);  // Asegurarse de que la meta no sea el mismo nodo que el inicio
+        // Solo permite seleccionar nodos si el juego está activo, el actor no se está moviendo y no se ha completado el recorrido
+        if (!isGameActive || isMoving || isCompleted) return;
 
-        // Instanciamos el actor y la meta en los nodos seleccionados
-        actor = Instantiate(actorPrefab, startNode.position, Quaternion.identity);
-        goal = Instantiate(goalPrefab, goalNode.position, Quaternion.identity);
-
-        // Cambiar el material de la meta al material que desees (por ejemplo, un material que tenga un color diferente)
-        if (goal != null)
+        if (placingActor)
         {
-            Renderer goalRenderer = goal.GetComponent<Renderer>(); // Obtener el componente Renderer de la meta
-            if (goalRenderer != null)  // Verificar si el componente Renderer existe
-            {
-                goalRenderer.material = InitialgoalMaterial;  // Cambiar el material de la meta
-            }
-            else
-            {
-                Debug.LogError("El objeto de la meta no tiene un componente Renderer.");
-            }
+            startNode = clickedNode;
+            clickedNode.button.GetComponent<Image>().color = startColor;
+            actor = Instantiate(actorPrefab, clickedNode.button.transform.position, Quaternion.identity, gridParent);
+            placingActor = false;
+        }
+        else
+        {
+            goalNode = clickedNode;
+            clickedNode.button.GetComponent<Image>().color = goalColor;
+            goal = Instantiate(goalPrefab, clickedNode.button.transform.position, Quaternion.identity, gridParent);
+
+            FindAndMoveToGoal();
         }
     }
 
-    // Calcular el camino más corto y mover al actor
     void FindAndMoveToGoal()
     {
         path = FindPath(startNode, goalNode);
@@ -113,120 +170,130 @@ public class MatrizBusqueda : MonoBehaviour
         StartCoroutine(MoveActorAlongPath());
     }
 
-    // Algoritmo A* para calcular el camino más corto
     List<Node> FindPath(Node startNode, Node goalNode)
     {
-        var openSet = new List<Node> { startNode };
-        var cameFrom = new Dictionary<Node, Node>();
-        var gScore = new Dictionary<Node, float>();
-        var fScore = new Dictionary<Node, float>();
+        List<Node> openList = new List<Node>();
+        List<Node> closedList = new List<Node>();
 
         foreach (var node in grid)
         {
-            gScore[node] = float.MaxValue;
-            fScore[node] = float.MaxValue;
+            node.gCost = float.MaxValue;
+            node.hCost = 0;
+            node.parent = null;
         }
 
-        gScore[startNode] = 0;
-        fScore[startNode] = Heuristic(startNode, goalNode);
+        startNode.gCost = 0;
+        startNode.hCost = GetHeuristic(startNode, goalNode);
+        openList.Add(startNode);
 
-        while (openSet.Count > 0)
+        while (openList.Count > 0)
         {
-            Node current = openSet[0];
-            foreach (var node in openSet)
+            Node currentNode = GetNodeWithLowestFCost(openList);
+
+            if (currentNode == goalNode)
             {
-                if (fScore[node] < fScore[current])
-                    current = node;
+                return ReconstructPath(goalNode);
             }
 
-            if (current == goalNode)
+            openList.Remove(currentNode);
+            closedList.Add(currentNode);
+
+            foreach (var neighbor in currentNode.neighbors)
             {
-                return ReconstructPath(cameFrom, current);
-            }
+                if (closedList.Contains(neighbor)) continue;
 
-            openSet.Remove(current);
+                float tentativeGCost = currentNode.gCost + 1;
 
-            foreach (var neighbor in current.neighbors)
-            {
-                float tentativeGScore = gScore[current] + 1;
-
-                if (tentativeGScore < gScore[neighbor])
+                if (!openList.Contains(neighbor) || tentativeGCost < neighbor.gCost)
                 {
-                    cameFrom[neighbor] = current;
-                    gScore[neighbor] = tentativeGScore;
-                    fScore[neighbor] = gScore[neighbor] + Heuristic(neighbor, goalNode);
+                    neighbor.gCost = tentativeGCost;
+                    neighbor.hCost = GetHeuristic(neighbor, goalNode);
+                    neighbor.parent = currentNode;
 
-                    if (!openSet.Contains(neighbor))
-                        openSet.Add(neighbor);
+                    if (!openList.Contains(neighbor))
+                    {
+                        openList.Add(neighbor);
+                    }
                 }
             }
         }
 
-        return null; // No se encontró un camino
+        return null;
     }
 
-    // Heurística de A* (distancia Manhattan)
-    float Heuristic(Node a, Node b)
+    float GetHeuristic(Node node, Node goalNode)
     {
-        return Mathf.Abs(a.position.x - b.position.x) + Mathf.Abs(a.position.y - b.position.y);
+        return Mathf.Abs(node.position.x - goalNode.position.x) + Mathf.Abs(node.position.y - goalNode.position.y);
     }
 
-    // Reconstruir el camino desde el nodo final al nodo inicial
-    List<Node> ReconstructPath(Dictionary<Node, Node> cameFrom, Node current)
+    Node GetNodeWithLowestFCost(List<Node> openList)
     {
-        var totalPath = new List<Node> { current };
-        while (cameFrom.ContainsKey(current))
+        Node lowestFCostNode = openList[0];
+        foreach (var node in openList)
         {
-            current = cameFrom[current];
-            totalPath.Add(current);
+            if (node.gCost + node.hCost < lowestFCostNode.gCost + lowestFCostNode.hCost)
+            {
+                lowestFCostNode = node;
+            }
         }
-        totalPath.Reverse();
-        return totalPath;
+        return lowestFCostNode;
     }
 
-    // Mover el actor por el camino
+    List<Node> ReconstructPath(Node goalNode)
+    {
+        List<Node> path = new List<Node>();
+        Node currentNode = goalNode;
+
+        while (currentNode != null)
+        {
+            path.Add(currentNode);
+            currentNode = currentNode.parent;
+        }
+
+        path.Reverse();
+        return path;
+    }
+
     IEnumerator MoveActorAlongPath()
     {
-        if (path == null || path.Count == 0)
-        {
-            Debug.LogError("No se encontró un camino para mover al actor.");
-            yield break;  // Detener la ejecución si no hay camino
-        }
+        isMoving = true;  // Activar la bandera de movimiento
 
         foreach (var node in path)
         {
-            if (node.visualNode == null)
+            if (node.button != null)
             {
-                Debug.LogError("El nodo no tiene asignado un objeto visual.");
-                yield break;  // Detener la ejecución si no hay visualNode en el nodo
+                node.button.GetComponent<Image>().color = pathColor;
             }
-
-            // Cambiar color del nodo actual para mostrar el camino
-            node.visualNode.GetComponent<Renderer>().material = pathMaterial;
 
             if (actor != null)
             {
-                actor.transform.position = node.position;
-            }
-            else
-            {
-                Debug.LogError("El actor no está instanciado.");
-                yield break;  // Detener la ejecución si el actor es null
+                Vector3 worldPosition = node.button.transform.position;
+                actor.transform.position = worldPosition;
             }
 
             yield return new WaitForSeconds(0.5f);
         }
 
-        // Cambiar el color de la meta cuando el actor llegue
-        if (goal != null)
-        {
-            Renderer goalRenderer = goal.GetComponent<Renderer>();
-            if (goalRenderer != null)
-            {
-                goalRenderer.material = goalReachedMaterial;  // Cambiar el color de la meta cuando el actor llegue
-            }
-        }
-
+        isMoving = false;  // Desactivar la bandera de movimiento
+        isCompleted = true; // Marcar como completado
         Debug.Log("El actor llegó a la meta.");
     }
+
+    // Método para reiniciar el juego
+    void RestartGame()
+    {
+        isGameActive = true;  // Habilitar la interacción
+        placingActor = true;  // Permitir colocar un nuevo actor
+        isMoving = false;     // Asegurarse de que no estamos en movimiento
+        isCompleted = false;  // Reiniciar el estado de completado
+        grid.Clear();  // Limpiar la cuadrícula
+        actor = null;  // Eliminar al actor
+        goal = null;   // Eliminar la meta
+        GenerateGrid(gridWidth, gridHeight);  // Regenerar el mapa
+    }
 }
+
+
+
+
+
